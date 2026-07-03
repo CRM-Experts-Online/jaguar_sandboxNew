@@ -1,0 +1,60 @@
+name: Deploy NetSuite
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install SuiteCloud CLI
+        run: npm install -g @oracle/suitecloud-cli
+
+      - name: Create Authentication File
+        run: |
+          mkdir -p ~/.suitecloud-sdk
+
+          cat <<EOF > ~/.suitecloud-sdk/authinfo.json
+          {
+            "accounts": {
+              "${{ secrets.NS_ACCOUNT }}": {
+                "defaultAuthId": "github"
+              }
+            },
+            "auths": {
+              "github": {
+                "account": "${{ secrets.NS_ACCOUNT }}",
+                "authType": "TOKEN",
+                "token": {
+                  "consumerKey": "${{ secrets.NS_CONSUMER_KEY }}",
+                  "consumerSecret": "${{ secrets.NS_CONSUMER_SECRET }}",
+                  "tokenId": "${{ secrets.NS_TOKEN_ID }}",
+                  "tokenSecret": "${{ secrets.NS_TOKEN_SECRET }}"
+                }
+              }
+            }
+          }
+          EOF
+
+      - name: Validate
+        run: |
+          suitecloud project:validate \
+            --account ${{ secrets.NS_ACCOUNT }} \
+            --authid github
+
+      - name: Deploy
+        run: |
+          suitecloud project:deploy \
+            --account ${{ secrets.NS_ACCOUNT }} \
+            --authid github
