@@ -1,0 +1,27 @@
+name: Validate SuiteCloud Project
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install SuiteCloud CLI
+        run: npm install -g @oracle/suitecloud-cli
+
+      - name: Validate Project
+        run: |
+          suitecloud project:validate
