@@ -11,7 +11,7 @@ define([
 
 
     /**************************************************************************
-     * GET INPUT DATA -- get all pmp records
+     * GET INPUT DATA -- get all pmp records extra changes
      **************************************************************************/
     function getInputData() {
 
