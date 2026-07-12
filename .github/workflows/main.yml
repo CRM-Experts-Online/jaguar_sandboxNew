@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  # ---------- Unit tests (no NetSuite connection needed) ----------
+  # ---------- Unit tests + coverage (no NetSuite connection needed) ----------
   test:
     if: >-
       github.event.pull_request.merged == true &&
@@ -38,24 +38,38 @@ jobs:
             exit 1
           fi
 
-      - name: Run Jest unit tests
+      # Coverage is enabled in jest.config.js, so `npm test` enforces the
+      # thresholds and fails the job if any metric is below target.
+      - name: Run Jest unit tests with coverage
         run: npm test
 
-  # ---------- Upload to NetSuite (only if tests pass) ----------
+      # Keep the coverage report as a downloadable artifact for inspection.
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore
+
+  # ---------- Upload to NetSuite (only if tests + coverage pass) ----------
   upload-netsuite:
     needs: test
     runs-on: ubuntu-latest
 
+    # SuiteCloud CLI in CI needs these two vars set for M2M auth to be allowed.
     env:
       SUITECLOUD_CI: "1"
       SUITECLOUD_CI_PASSKEY: ${{ secrets.SUITECLOUD_CI_PASSKEY }}
 
     steps:
+      # fetch-depth: 0 gives full history so the changed-files diff below works.
       - name: Check out code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      # SuiteCloud CLI requires a JDK to be present on the runner.
       - name: Set up Java (JDK 17)
         uses: actions/setup-java@v5
         with:
@@ -67,9 +81,11 @@ jobs:
         with:
           node-version: 24
 
+      # --acceptSuiteCloudSDKLicense skips the interactive license prompt in CI.
       - name: Install SuiteCloud CLI
         run: npm install -g --acceptSuiteCloudSDKLicense @oracle/suitecloud-cli
 
+      # The private key is stored base64-encoded in a secret so newlines survive.
       - name: Restore NetSuite private key
         env:
           NS_PRIVATE_KEY_B64: ${{ secrets.NS_PRIVATE_KEY_B64 }}
@@ -77,6 +93,7 @@ jobs:
           echo "$NS_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/ns-private.pem"
           chmod 600 "$RUNNER_TEMP/ns-private.pem"
 
+      # M2M / OAuth 2.0 auth. --authid must match DefaultAuthID in project.json.
       - name: Authenticate to NetSuite (M2M)
         env:
           NS_ACCOUNT_ID:     ${{ secrets.NS_ACCOUNT_ID }}
@@ -89,6 +106,8 @@ jobs:
             --certificateid "$NS_CERTIFICATE_ID" \
             --privatekeypath "$RUNNER_TEMP/ns-private.pem"
 
+      # Upload only the File Cabinet files changed in this PR.
+      # Paths are File Cabinet paths (rooted at src/FileCabinet), not disk paths.
       - name: Upload changed files to NetSuite
         run: |
           CHANGED=$(git diff --name-only \
