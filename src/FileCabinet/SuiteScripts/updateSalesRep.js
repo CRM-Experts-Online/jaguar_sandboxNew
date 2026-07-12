@@ -16,12 +16,12 @@ define(['N/record'], function (record) {
       log.debug('type', type);
 
       if(type == 'employee'){
-        var expenseSublist = context.form.getSublist({‌id:'payroll'});
+        var expenseSublist = context.form.getSublist({id:'payroll'});
       log.debug('expenseSublist', expenseSublist);
 		expenseSublist.setDisplayType = 'hidden';
       }
 
-	//if (expenseForm == 103) {‌ //change this to an internal id of the custom form you want to hide the expense subtab.
+	//if (expenseForm == 103) { //change this to an internal id of the custom form you want to hide the expense subtab.
 		
 	//}
     }catch(er){
