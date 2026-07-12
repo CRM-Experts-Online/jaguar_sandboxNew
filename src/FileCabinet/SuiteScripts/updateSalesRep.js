@@ -6,7 +6,7 @@ define(['N/record'], function (record) {
 
    function beforeLoad(context) {
     
-    ‌try{
+    try{
       var type = context.type;
 
       var newRec =  context.newRecord;
