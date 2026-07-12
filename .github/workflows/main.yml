@@ -1,0 +1,14 @@
+name: On PR Merge
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  merged:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run merge tasks
+        run: echo "PR #${{ github.event.pull_request.number }} was merged into ${{ github.event.pull_request.base.ref }}"
