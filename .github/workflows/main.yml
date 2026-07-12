@@ -1,83 +1,75 @@
 # .github/workflows/on-pr-merge.yml
-name: On PR Merge — Upload Files to NetSuite
+name: On PR Merge — Test & Upload to NetSuite
 
-# A PR merge fires a `pull_request` event with action `closed`.
-# There's no dedicated "merged" trigger — you filter for it with the `if` below.
 on:
   pull_request:
     types: [closed]
 
-# Least-privilege default; widen per-job only if a step needs more.
 permissions:
   contents: read
 
 jobs:
-  upload-netsuite:
-    # Runs ONLY on an actual merge into main/master, not on a plain close.
-    # If your base branch is something else (develop, release/*), add it here
-    # or check the "Debug condition values" step output below to see base.ref.
+  # ---------- Unit tests (no NetSuite connection needed) ----------
+  test:
     if: >-
       github.event.pull_request.merged == true &&
       contains(fromJSON('["main","master"]'), github.event.pull_request.base.ref)
     runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
 
-    # SuiteCloud CLI in CI needs these two vars set for M2M auth to be allowed.
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      # Install ALL deps including devDependencies. Do NOT set NODE_ENV=production
+      # or pass --omit=dev here, or @oracle/suitecloud-unit-testing won't install.
+      - name: Install dependencies
+        run: npm ci
+
+      # Sanity check: fail early with a clear message if the package is missing.
+      - name: Verify unit-testing package is present
+        run: |
+          if [ ! -d node_modules/@oracle/suitecloud-unit-testing ]; then
+            echo "::error::@oracle/suitecloud-unit-testing not installed — check it's a devDependency and NODE_ENV isn't 'production'."
+            exit 1
+          fi
+
+      - name: Run Jest unit tests
+        run: npm test
+
+  # ---------- Upload to NetSuite (only if tests pass) ----------
+  upload-netsuite:
+    needs: test
+    runs-on: ubuntu-latest
+
     env:
       SUITECLOUD_CI: "1"
       SUITECLOUD_CI_PASSKEY: ${{ secrets.SUITECLOUD_CI_PASSKEY }}
 
     steps:
-      # ---- Diagnostic: shows exactly what the if-condition evaluated against.
-      # If the job ever skips again, temporarily relax the if to just
-      # `github.event.pull_request.merged == true` and read these values.
-      - name: Debug condition values
-        env:
-          MERGED:  ${{ github.event.pull_request.merged }}
-          BASEREF: ${{ github.event.pull_request.base.ref }}
-          ACTION:  ${{ github.event.action }}
-        run: |
-          echo "action   = '${ACTION}'"
-          echo "merged   = '${MERGED}'"
-          echo "base.ref = '${BASEREF}'"
-
-      # checkout v6 runs on Node 24 — no deprecation warning.
-      # fetch-depth: 0 gives full history so the changed-files diff below works.
       - name: Check out code
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      # SuiteCloud CLI requires a JDK to be present on the runner.
       - name: Set up Java (JDK 17)
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      # setup-node v5 also runs on Node 24.
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
           node-version: 24
 
-      # --acceptSuiteCloudSDKLicense skips the interactive license prompt in CI.
       - name: Install SuiteCloud CLI
         run: npm install -g --acceptSuiteCloudSDKLicense @oracle/suitecloud-cli
 
-      # Log the merge context (all ${{ }} values routed through env: to avoid
-      # "unexpected EOF" from quotes/apostrophes and to block script injection).
-      - name: Show merge details
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE:  ${{ github.event.pull_request.title }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
-        run: |
-          echo "PR #${PR_NUMBER} merged: ${PR_TITLE}"
-          echo "Author: ${PR_AUTHOR}  |  Merged by: ${MERGED_BY}"
-
-      # The private key is stored base64-encoded in a secret so newlines survive.
-      # Decode it to a file the CLI can read, with tight permissions.
       - name: Restore NetSuite private key
         env:
           NS_PRIVATE_KEY_B64: ${{ secrets.NS_PRIVATE_KEY_B64 }}
@@ -85,7 +77,6 @@ jobs:
           echo "$NS_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/ns-private.pem"
           chmod 600 "$RUNNER_TEMP/ns-private.pem"
 
-      # M2M / OAuth 2.0 auth. --authid must match DefaultAuthID in project.json.
       - name: Authenticate to NetSuite (M2M)
         env:
           NS_ACCOUNT_ID:     ${{ secrets.NS_ACCOUNT_ID }}
@@ -98,11 +89,8 @@ jobs:
             --certificateid "$NS_CERTIFICATE_ID" \
             --privatekeypath "$RUNNER_TEMP/ns-private.pem"
 
-      # Upload only the File Cabinet files changed in this PR.
-      # Paths are File Cabinet paths (rooted at src/FileCabinet), not disk paths.
       - name: Upload changed files to NetSuite
         run: |
-          # List files changed in the merge, keep only FileCabinet ones.
           CHANGED=$(git diff --name-only \
             "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" \
             | grep '^src/FileCabinet/' || true)
@@ -112,14 +100,10 @@ jobs:
             exit 0
           fi
 
-          # Strip the local prefix to get File Cabinet paths (e.g. /SuiteScripts/x.js).
           PATHS=$(echo "$CHANGED" | sed 's#^src/FileCabinet##')
-
           echo "Uploading:"; echo "$PATHS"
-          # xargs feeds each path as a separate argument to --paths.
           echo "$PATHS" | xargs suitecloud file:upload --paths
 
-      # Never leave the key on disk, even though the runner is ephemeral.
       - name: Clean up key
         if: always()
         run: rm -f "$RUNNER_TEMP/ns-private.pem"
