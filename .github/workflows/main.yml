@@ -14,9 +14,7 @@ permissions:
 jobs:
   upload-netsuite:
     # Runs ONLY when the PR was actually merged into main, not merely closed.
-    if: >-
-      github.event.pull_request.merged == true &&
-      github.event.pull_request.base.ref == 'main'
+   if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
     # SuiteCloud CLI in CI needs these two vars set for M2M auth to be allowed.
