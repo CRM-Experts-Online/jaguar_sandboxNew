@@ -23,20 +23,29 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v6
 
-      # Example toolchain step; setup-node@v5 is also Node 24.
+      # setup-node@v5 is also Node 24.
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
           node-version: 24
 
+      # All ${{ }} values are passed via env: — never inlined into the script.
+      # This prevents "unexpected EOF" from quotes/apostrophes AND blocks script injection.
       - name: Show merge details
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE:  ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF:  ${{ github.event.pull_request.head.ref }}
+          BASE_REF:  ${{ github.event.pull_request.base.ref }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
         run: |
-          echo "PR #${{ github.event.pull_request.number }} merged"
-          echo "Title:  ${{ github.event.pull_request.title }}"
-          echo "Author: ${{ github.event.pull_request.user.login }}"
-          echo "From:   ${{ github.event.pull_request.head.ref }}"
-          echo "Into:   ${{ github.event.pull_request.base.ref }}"
-          echo "By:     ${{ github.event.pull_request.merged_by.login }}"
+          echo "PR #${PR_NUMBER} merged"
+          echo "Title:  ${PR_TITLE}"
+          echo "Author: ${PR_AUTHOR}"
+          echo "From:   ${HEAD_REF}"
+          echo "Into:   ${BASE_REF}"
+          echo "By:     ${MERGED_BY}"
 
       # ---- put your real post-merge work here ----
       - name: Install and build
@@ -45,5 +54,8 @@ jobs:
           npm run build
 
       # Optional: dump the full payload while debugging, then delete.
+      # Payload also routed through env: for the same safety reasons.
       # - name: Debug event payload
-      #   run: echo '${{ toJSON(github.event.pull_request) }}'
+      #   env:
+      #     PAYLOAD: ${{ toJSON(github.event.pull_request) }}
+      #   run: echo "$PAYLOAD"
