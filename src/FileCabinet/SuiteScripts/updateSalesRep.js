@@ -3,6 +3,8 @@
  *@NScriptType UserEventScript
  */
 define(['N/record'], function (record) {
+	
+	//test
 
    function beforeLoad(context) {
     
