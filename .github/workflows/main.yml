@@ -1,3 +1,59 @@
+
+Claude finished the response
+unexpected EOF while looking for matching
+
+
+Diagnosed bash quoting vulnerability and devised environment variable solution
+Diagnosed bash quoting vulnerability and devised environment variable solution
+That error is a shell quoting problem, and it's almost certainly coming from the echo steps in that workflow. Here's what's happening.
+
+GitHub substitutes ${{ ... }} expressions as raw text into the shell script before bash parses it. So if a PR title (or author name, or the JSON payload) contains a quote character or apostrophe, it breaks the surrounding quotes and bash hits the end of the line still looking for a closing " or ' — hence "unexpected EOF while looking for matching."
+
+For example, a PR titled Fix Dave's bug turns this:
+
+yaml
+echo "Title: ${{ github.event.pull_request.title }}"
+into this at runtime:
+
+bash
+echo "Title: Fix Dave's bug"   # still fine here...
+but the toJSON debug line wrapped in single quotes is the usual killer — any apostrophe inside the JSON closes the quote early. This is also a security hole (script injection), so the correct fix is to pass values through env: instead of interpolating them into the script:
+
+yaml
+      - name: Show merge details
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE:  ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF:  ${{ github.event.pull_request.head.ref }}
+          BASE_REF:  ${{ github.event.pull_request.base.ref }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+        run: |
+          echo "PR #${PR_NUMBER} merged"
+          echo "Title:  ${PR_TITLE}"
+          echo "Author: ${PR_AUTHOR}"
+          echo "From:   ${HEAD_REF}"
+          echo "Into:   ${BASE_REF}"
+          echo "By:     ${MERGED_BY}"
+Now bash sees only ${PR_TITLE}, and the actual title lives in an environment variable where quotes and apostrophes can't break the script.
+
+Same fix for the debug line:
+
+yaml
+      - name: Debug event payload
+        env:
+          PAYLOAD: ${{ toJSON(github.event.pull_request) }}
+        run: echo "$PAYLOAD"
+Rule of thumb
+Never drop ${{ github.event... }} values directly inside a run: script — especially anything user-controlled like titles, branch names, commit messages, or issue bodies. Route them through env: and reference them as shell variables. It fixes the EOF error and closes the injection risk at the same time.
+
+If the error is coming from a different step, paste the failing run: block (and the PR title/branch name if relevant) and I'll pinpoint the exact unmatched quote.
+
+share full script with changes
+
+Here's the complete workflow file with the quoting fix applied throughout.
+
+yaml
 # .github/workflows/on-pr-merge.yml
 name: On PR Merge
 
@@ -59,3 +115,275 @@ jobs:
       #   env:
       #     PAYLOAD: ${{ toJSON(github.event.pull_request) }}
       #   run: echo "$PAYLOAD"
+What changed from the earlier version: every ${{ github.event... }} expression in the run: steps now lives in an env: block and is referenced as a shell variable (${PR_TITLE}, etc.), and the debug step got the same treatment. That's the fix for the "unexpected EOF while looking for matching" error — bash never sees the raw title/branch text, so a stray quote or apostrophe can't break the script.
+
+Two reminders for deploying it: this file has to be on your base branch (e.g. main) before the trigger will fire, and you can verify the if guard by closing a PR without merging (job should skip) versus merging one (job should run).
+
+If you paste what the workflow should actually do on merge, I'll replace the npm ci && npm run build placeholder with the real steps.
+
+add netsuite integration to connect and update the script file
+
+
+Thinking about integrating NetSuite connectivity and script file updates
+Thinking about integrating NetSuite connectivity and script file updates
+This involves specific SuiteCloud CLI commands and CI auth flows that Oracle changes across versions — let me verify the current approach before writing it into the file.
+
+
+Searched the web
+Searched the web
+I have what I need. Modern SuiteCloud CLI (v3+) requires OAuth 2.0 machine-to-machine auth for CI — token-based auth was removed in NetSuite 2024.2. The flow is: install @oracle/suitecloud-cli, authenticate with account:setup:ci using a certificate + private key, then project:deploy. Here's the complete file.
+
+yaml
+# .github/workflows/on-pr-merge.yml
+name: On PR Merge — Deploy to NetSuite
+
+# A PR merge fires a `pull_request` event with action `closed`.
+# There's no dedicated "merged" trigger — you filter for it with the `if` below.
+on:
+  pull_request:
+    types: [closed]
+
+# Least-privilege default; widen per-job only if a step needs more.
+permissions:
+  contents: read
+
+jobs:
+  deploy-netsuite:
+    # Runs ONLY when the PR was actually merged into main, not merely closed.
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+
+    # SuiteCloud CLI in CI needs these two vars set for M2M auth to be allowed.
+    env:
+      SUITECLOUD_CI: "1"
+      SUITECLOUD_CI_PASSKEY: ${{ secrets.SUITECLOUD_CI_PASSKEY }}
+
+    steps:
+      # checkout v6 runs on Node 24 — no deprecation warning.
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      # SuiteCloud CLI requires a JDK to be present on the runner.
+      - name: Set up Java (JDK 17)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # setup-node v5 also runs on Node 24.
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      # --acceptSuiteCloudSDKLicense skips the interactive license prompt in CI.
+      - name: Install SuiteCloud CLI
+        run: npm install -g --acceptSuiteCloudSDKLicense @oracle/suitecloud-cli
+
+      # Log the merge context (all ${{ }} values routed through env: to avoid
+      # "unexpected EOF" from quotes/apostrophes and to block script injection).
+      - name: Show merge details
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE:  ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+        run: |
+          echo "PR #${PR_NUMBER} merged: ${PR_TITLE}"
+          echo "Author: ${PR_AUTHOR}  |  Merged by: ${MERGED_BY}"
+
+      # The private key is stored base64-encoded in a secret so newlines survive.
+      # Decode it to a file the CLI can read, with tight permissions.
+      - name: Restore NetSuite private key
+        env:
+          NS_PRIVATE_KEY_B64: ${{ secrets.NS_PRIVATE_KEY_B64 }}
+        run: |
+          echo "$NS_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/ns-private.pem"
+          chmod 600 "$RUNNER_TEMP/ns-private.pem"
+
+      # M2M / OAuth 2.0 auth. --authid must match DefaultAuthID in project.json.
+      - name: Authenticate to NetSuite (M2M)
+        env:
+          NS_ACCOUNT_ID:     ${{ secrets.NS_ACCOUNT_ID }}
+          NS_AUTH_ID:        ${{ secrets.NS_AUTH_ID }}
+          NS_CERTIFICATE_ID: ${{ secrets.NS_CERTIFICATE_ID }}
+        run: |
+          suitecloud account:setup:ci \
+            --account "$NS_ACCOUNT_ID" \
+            --authid "$NS_AUTH_ID" \
+            --certificateid "$NS_CERTIFICATE_ID" \
+            --privatekeypath "$RUNNER_TEMP/ns-private.pem"
+
+      # Dry-run validation against the account before deploying — fail fast.
+      - name: Validate project
+        run: suitecloud project:deploy --dryrun
+
+      # Deploy the actual script/objects. This updates your script file(s) in NetSuite.
+      - name: Deploy to NetSuite
+        run: suitecloud project:deploy
+
+      # Never leave the key on disk, even though the runner is ephemeral.
+      - name: Clean up key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ns-private.pem"
+What you need to set up before this runs
+GitHub secrets (repo → Settings → Secrets and variables → Actions):
+
+Secret	What it is
+NS_ACCOUNT_ID	Your account ID, e.g. 1234567_SB1 for a sandbox
+NS_AUTH_ID	The auth ID you chose during local account:setup:ci — must match DefaultAuthID in project.json
+NS_CERTIFICATE_ID	The certificate ID NetSuite returns when you upload the public key
+NS_PRIVATE_KEY_B64	Your private key, base64-encoded (base64 -w0 private.pem on Linux, base64 -i private.pem on macOS)
+SUITECLOUD_CI_PASSKEY	Any secure passkey string; the CLI uses it to encrypt its credentials file
+On the NetSuite side, one-time setup: enable the OAuth 2.0 and SuiteCloud Development Framework features on the account, then create an RSA certificate and map it to a user+role under the SuiteCloud Development Integration app. Two gotchas worth flagging from people who've hit them:
+
+Use an RSA key, not an EC key. Several developers report the error with the private key failure with EC keys that goes away when they switch to RSA. Generate with something like openssl req -new -x509 -newkey rsa:4096 -keyout private.pem -sigopt rsa_padding_mode:pss -sha256 ....
+The SUITECLOUD_CI and SUITECLOUD_CI_PASSKEY env vars are mandatory. Without them you get Machine-to-machine authentication is not allowed for the current execution context. They're set at the job level in the file above.
+One more thing worth knowing: the default auth ID for deployment can't be changed via the CLI in a pipeline, so make sure DefaultAuthID in your project's project.json already equals whatever you put in NS_AUTH_ID.
+
+A note on scope
+"Update the script file" — if you mean deploying SuiteScript .js files plus their script/deployment records, project:deploy handles the whole SDF project (files in the File Cabinet folders plus objects in the manifest). If you only want to push files and not touch objects, suitecloud file:upload --paths /SuiteScripts/yourfile.js is the narrower command; swap it in for the deploy step.
+
+Want me to adjust this for a sandbox-vs-production split (e.g. deploy to sandbox on merge to develop, production on merge to main), or add the file:upload variant instead of a full deploy?
+
+add file:upload variant
+
+Here's the complete file using file:upload instead of a full project deploy. This pushes specific SuiteScript files to the File Cabinet without touching script/deployment records or other SDF objects.
+
+yaml
+# .github/workflows/on-pr-merge.yml
+name: On PR Merge — Upload Files to NetSuite
+
+# A PR merge fires a `pull_request` event with action `closed`.
+# There's no dedicated "merged" trigger — you filter for it with the `if` below.
+on:
+  pull_request:
+    types: [closed]
+
+# Least-privilege default; widen per-job only if a step needs more.
+permissions:
+  contents: read
+
+jobs:
+  upload-netsuite:
+    # Runs ONLY when the PR was actually merged into main, not merely closed.
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+
+    # SuiteCloud CLI in CI needs these two vars set for M2M auth to be allowed.
+    env:
+      SUITECLOUD_CI: "1"
+      SUITECLOUD_CI_PASSKEY: ${{ secrets.SUITECLOUD_CI_PASSKEY }}
+
+    steps:
+      # checkout v6 runs on Node 24 — no deprecation warning.
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      # SuiteCloud CLI requires a JDK to be present on the runner.
+      - name: Set up Java (JDK 17)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # setup-node v5 also runs on Node 24.
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      # --acceptSuiteCloudSDKLicense skips the interactive license prompt in CI.
+      - name: Install SuiteCloud CLI
+        run: npm install -g --acceptSuiteCloudSDKLicense @oracle/suitecloud-cli
+
+      # Log the merge context (all ${{ }} values routed through env: to avoid
+      # "unexpected EOF" from quotes/apostrophes and to block script injection).
+      - name: Show merge details
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE:  ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+        run: |
+          echo "PR #${PR_NUMBER} merged: ${PR_TITLE}"
+          echo "Author: ${PR_AUTHOR}  |  Merged by: ${MERGED_BY}"
+
+      # The private key is stored base64-encoded in a secret so newlines survive.
+      # Decode it to a file the CLI can read, with tight permissions.
+      - name: Restore NetSuite private key
+        env:
+          NS_PRIVATE_KEY_B64: ${{ secrets.NS_PRIVATE_KEY_B64 }}
+        run: |
+          echo "$NS_PRIVATE_KEY_B64" | base64 --decode > "$RUNNER_TEMP/ns-private.pem"
+          chmod 600 "$RUNNER_TEMP/ns-private.pem"
+
+      # M2M / OAuth 2.0 auth. --authid must match DefaultAuthID in project.json.
+      - name: Authenticate to NetSuite (M2M)
+        env:
+          NS_ACCOUNT_ID:     ${{ secrets.NS_ACCOUNT_ID }}
+          NS_AUTH_ID:        ${{ secrets.NS_AUTH_ID }}
+          NS_CERTIFICATE_ID: ${{ secrets.NS_CERTIFICATE_ID }}
+        run: |
+          suitecloud account:setup:ci \
+            --account "$NS_ACCOUNT_ID" \
+            --authid "$NS_AUTH_ID" \
+            --certificateid "$NS_CERTIFICATE_ID" \
+            --privatekeypath "$RUNNER_TEMP/ns-private.pem"
+
+      # Upload specific files to the File Cabinet. Paths are the File Cabinet
+      # paths as they appear in your SDF project (under the FileCabinet folder),
+      # NOT local disk paths. Multiple paths are space-separated.
+      - name: Upload files to NetSuite
+        run: |
+          suitecloud file:upload --paths \
+            "/SuiteScripts/my-script.js" \
+            "/SuiteScripts/lib/helpers.js"
+
+      # Never leave the key on disk, even though the runner is ephemeral.
+      - name: Clean up key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ns-private.pem"
+Key differences from the deploy version
+The deploy step is replaced by file:upload --paths, which pushes only the named files. A few things that trip people up:
+
+The paths are File Cabinet paths, not local paths. They're rooted at your SDF project's FileCabinet folder — so a file at src/FileCabinet/SuiteScripts/my-script.js on disk is referenced as /SuiteScripts/my-script.js in the command. The file must already exist in your project's FileCabinet directory; file:upload mirrors what's on disk up to the account.
+
+file:upload only moves file content — it does not create or update script records, deployment records, custom fields, or any other SDF object. If your PR added a new script that needs a new Script record and Script Deployment in NetSuite, file:upload alone won't wire those up; you'd need project:deploy for that first time, then file:upload for subsequent code-only changes. This is the usual pattern: deploy once to establish records, then fast file uploads for iterative script edits.
+
+Optional: upload only the files changed in the PR
+If you don't want to hardcode paths, you can derive them from the merge. Replace the upload step with something like this, which maps changed files under your File Cabinet folder to their in-project paths:
+
+yaml
+      - name: Upload changed files to NetSuite
+        run: |
+          # List files changed in the merge commit, keep only FileCabinet ones.
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} \
+            | grep '^src/FileCabinet/' || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No File Cabinet files changed; nothing to upload."
+            exit 0
+          fi
+
+          # Strip the local prefix to get File Cabinet paths (e.g. /SuiteScripts/x.js).
+          PATHS=$(echo "$CHANGED" | sed 's#^src/FileCabinet##')
+
+          echo "Uploading:"; echo "$PATHS"
+          # xargs feeds each path as a separate --paths argument.
+          echo "$PATHS" | xargs suitecloud file:upload --paths
+Adjust src/FileCabinet/ to match your actual project layout. Note that if you need checkout to see the base commit for the git diff, add with: { fetch-depth: 0 } to the checkout step so the full history is available.
+
+Want me to fold that changed-files detection into the main file as the default, or keep the explicit hardcoded-paths version?
+
+
+
+
+
+
+
+Claude is AI and can make mistakes. Please double-check responses.
