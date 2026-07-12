@@ -1,14 +1,49 @@
+# .github/workflows/on-pr-merge.yml
 name: On PR Merge
 
+# A PR merge fires a `pull_request` event with action `closed`.
+# There's no dedicated "merged" trigger — you filter for it with the `if` below.
 on:
   pull_request:
     types: [closed]
 
+# Least-privilege default; widen per-job only if a step needs more.
+permissions:
+  contents: read
+
 jobs:
-  merged:
+  on-merge:
+    # Runs ONLY when the PR was actually merged, not merely closed.
+    # Add `&& github.event.pull_request.base.ref == 'main'` to scope to one branch.
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Run merge tasks
-        run: echo "PR #${{ github.event.pull_request.number }} was merged into ${{ github.event.pull_request.base.ref }}"
+      # v6 (or v5+) runs on Node 24 — no deprecation warning.
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      # Example toolchain step; setup-node@v5 is also Node 24.
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Show merge details
+        run: |
+          echo "PR #${{ github.event.pull_request.number }} merged"
+          echo "Title:  ${{ github.event.pull_request.title }}"
+          echo "Author: ${{ github.event.pull_request.user.login }}"
+          echo "From:   ${{ github.event.pull_request.head.ref }}"
+          echo "Into:   ${{ github.event.pull_request.base.ref }}"
+          echo "By:     ${{ github.event.pull_request.merged_by.login }}"
+
+      # ---- put your real post-merge work here ----
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      # Optional: dump the full payload while debugging, then delete.
+      # - name: Debug event payload
+      #   run: echo '${{ toJSON(github.event.pull_request) }}'
