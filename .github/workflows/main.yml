@@ -53,6 +53,7 @@ jobs:
   upload-netsuite:
     needs: test
     runs-on: ubuntu-latest
+    environment: sandbox
 
     # SuiteCloud CLI in CI needs BOTH of these set for M2M auth to be allowed.
     # SUITECLOUD_CI_PASSKEY MUST be non-empty and match the passkey used to
