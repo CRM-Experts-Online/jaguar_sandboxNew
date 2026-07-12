@@ -30,7 +30,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Sanity check: fail early with a clear message if the package is missing.
       - name: Verify unit-testing package is present
         run: |
           if [ ! -d node_modules/@oracle/suitecloud-unit-testing ]; then
@@ -38,12 +37,10 @@ jobs:
             exit 1
           fi
 
-      # Coverage is enabled in jest.config.js, so `npm test` enforces the
-      # thresholds and fails the job if any metric is below target.
+      # Coverage is enabled in jest.config.js (informational — no threshold gate).
       - name: Run Jest unit tests with coverage
         run: npm test
 
-      # Keep the coverage report as a downloadable artifact for inspection.
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4
@@ -52,12 +49,14 @@ jobs:
           path: coverage/
           if-no-files-found: ignore
 
-  # ---------- Upload to NetSuite (only if tests + coverage pass) ----------
+  # ---------- Upload to NetSuite (only if tests pass) ----------
   upload-netsuite:
     needs: test
     runs-on: ubuntu-latest
 
-    # SuiteCloud CLI in CI needs these two vars set for M2M auth to be allowed.
+    # SuiteCloud CLI in CI needs BOTH of these set for M2M auth to be allowed.
+    # SUITECLOUD_CI_PASSKEY MUST be non-empty and match the passkey used to
+    # create the credentials in account:setup:ci below.
     env:
       SUITECLOUD_CI: "1"
       SUITECLOUD_CI_PASSKEY: ${{ secrets.SUITECLOUD_CI_PASSKEY }}
@@ -68,6 +67,16 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      # Fail fast with a clear message if the passkey secret is missing/empty.
+      # An empty passkey is why the CLI reports only "SUITECLOUD_CI" is set.
+      - name: Verify CI env vars are set
+        run: |
+          if [ -z "$SUITECLOUD_CI_PASSKEY" ]; then
+            echo "::error::SUITECLOUD_CI_PASSKEY secret is empty or missing. Add it in repo Settings → Secrets and variables → Actions, using the SAME passkey you used for account:setup:ci."
+            exit 1
+          fi
+          echo "Passkey is set (length: ${#SUITECLOUD_CI_PASSKEY})."
 
       # SuiteCloud CLI requires a JDK to be present on the runner.
       - name: Set up Java (JDK 17)
@@ -94,6 +103,7 @@ jobs:
           chmod 600 "$RUNNER_TEMP/ns-private.pem"
 
       # M2M / OAuth 2.0 auth. --authid must match DefaultAuthID in project.json.
+      # Encrypts the credentials file using SUITECLOUD_CI_PASSKEY (set at job level).
       - name: Authenticate to NetSuite (M2M)
         env:
           NS_ACCOUNT_ID:     ${{ secrets.NS_ACCOUNT_ID }}
