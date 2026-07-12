@@ -13,8 +13,12 @@ permissions:
 
 jobs:
   upload-netsuite:
-    # Runs ONLY when the PR was actually merged into main, not merely closed.
-   if: github.event.pull_request.merged == true
+    # Runs ONLY on an actual merge into main/master, not on a plain close.
+    # If your base branch is something else (develop, release/*), add it here
+    # or check the "Debug condition values" step output below to see base.ref.
+    if: >-
+      github.event.pull_request.merged == true &&
+      contains(fromJSON('["main","master"]'), github.event.pull_request.base.ref)
     runs-on: ubuntu-latest
 
     # SuiteCloud CLI in CI needs these two vars set for M2M auth to be allowed.
@@ -23,9 +27,25 @@ jobs:
       SUITECLOUD_CI_PASSKEY: ${{ secrets.SUITECLOUD_CI_PASSKEY }}
 
     steps:
+      # ---- Diagnostic: shows exactly what the if-condition evaluated against.
+      # If the job ever skips again, temporarily relax the if to just
+      # `github.event.pull_request.merged == true` and read these values.
+      - name: Debug condition values
+        env:
+          MERGED:  ${{ github.event.pull_request.merged }}
+          BASEREF: ${{ github.event.pull_request.base.ref }}
+          ACTION:  ${{ github.event.action }}
+        run: |
+          echo "action   = '${ACTION}'"
+          echo "merged   = '${MERGED}'"
+          echo "base.ref = '${BASEREF}'"
+
       # checkout v6 runs on Node 24 — no deprecation warning.
+      # fetch-depth: 0 gives full history so the changed-files diff below works.
       - name: Check out code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       # SuiteCloud CLI requires a JDK to be present on the runner.
       - name: Set up Java (JDK 17)
@@ -78,14 +98,26 @@ jobs:
             --certificateid "$NS_CERTIFICATE_ID" \
             --privatekeypath "$RUNNER_TEMP/ns-private.pem"
 
-      # Upload specific files to the File Cabinet. Paths are the File Cabinet
-      # paths as they appear in your SDF project (under the FileCabinet folder),
-      # NOT local disk paths. Multiple paths are space-separated.
-      - name: Upload files to NetSuite
+      # Upload only the File Cabinet files changed in this PR.
+      # Paths are File Cabinet paths (rooted at src/FileCabinet), not disk paths.
+      - name: Upload changed files to NetSuite
         run: |
-          suitecloud file:upload --paths \
-            "/SuiteScripts/my-script.js" \
-            "/SuiteScripts/lib/helpers.js"
+          # List files changed in the merge, keep only FileCabinet ones.
+          CHANGED=$(git diff --name-only \
+            "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" \
+            | grep '^src/FileCabinet/' || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No File Cabinet files changed; nothing to upload."
+            exit 0
+          fi
+
+          # Strip the local prefix to get File Cabinet paths (e.g. /SuiteScripts/x.js).
+          PATHS=$(echo "$CHANGED" | sed 's#^src/FileCabinet##')
+
+          echo "Uploading:"; echo "$PATHS"
+          # xargs feeds each path as a separate argument to --paths.
+          echo "$PATHS" | xargs suitecloud file:upload --paths
 
       # Never leave the key on disk, even though the runner is ephemeral.
       - name: Clean up key
